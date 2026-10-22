@@ -165,7 +165,13 @@
   // standard way to count a fast song at a marchable, half-speed pace while
   // still phrasing it in 8s. All counting (display, phrases, timeline, voice,
   // export) derives from this one list, so half-time stays consistent.
-  function countBeats() {
+  // Cached active count-beats. Recomputed ONLY when the song or a count option
+  // changes (via refreshCountBeats), never inside the 60fps render loop — the
+  // old per-frame rebuild/allocation was what made half-time stutter.
+  let _countBeatsCache = [];
+  function countBeats() { return _countBeatsCache; }
+
+  function refreshCountBeats() {
     // Only count from the chosen origin onward, so the count never ticks
     // during a silent / spoken intro before the music (or before your
     // choreography's downbeat if you set one manually).
@@ -175,15 +181,14 @@
     // hair before the detected start still counts as beat 1).
     let startIdx = 0;
     while (startIdx < all.length && all[startIdx] < origin - 0.03) startIdx++;
-    const usable = all.slice(startIdx);
-    if (S.beatStep <= 1) return usable;
     const out = [];
-    for (let i = 0; i < usable.length; i += S.beatStep) out.push(usable[i]);
-    return out;
+    for (let i = startIdx; i < all.length; i += S.beatStep) out.push(all[i]);
+    _countBeatsCache = out;
   }
 
   // Group the active count-beats into phrases of the active count length.
   function buildPhrases() {
+    refreshCountBeats();           // recompute the cached count-beats first
     const beats = countBeats();
     S.phrases = [];
     for (let i = 0; i < beats.length; i += S.countLen) {
@@ -418,9 +423,12 @@
     while (next < beats.length && beats[next] <= t) next++;
     if (next >= beats.length) return;
 
-    // Scale the lead by playback rate (slower playback => more song-time lead
-    // is fine; the perceived gap stays constant).
-    const lead = Voice.lead * (S.audio.playbackRate || 1);
+    // Lead = speak a little BEFORE the beat so the number lands on it. Base
+    // lead offsets TTS startup latency; we also add a fraction of the actual
+    // count interval so half-time (wider gaps) leads proportionally earlier
+    // and the spoken count doesn't arrive late.
+    const interval = next > 0 ? (beats[next] - beats[next - 1]) : Voice.lead * 2;
+    const lead = (Voice.lead + interval * 0.18) * (S.audio.playbackRate || 1);
     const due = beats[next] - t <= lead;
     if (!due || next === S.lastSpokenBeat) return;
 

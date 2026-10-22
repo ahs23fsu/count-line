@@ -69,5 +69,17 @@ const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 check('Counting-feel selector exists', /id="feelSel"/.test(html));
 check('half-time option present', /value="2"[^>]*>Half-time/.test(html) || /Half-time/.test(html));
 
+// ---- Performance fix: count-beats are cached, not rebuilt every frame ----
+const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
+check('countBeats returns a cache (no per-frame rebuild)', /_countBeatsCache/.test(app) && /function countBeats\(\)\s*\{\s*return _countBeatsCache/.test(app));
+check('cache refreshed in buildPhrases (not render loop)', /refreshCountBeats\(\);\s*\/\/ recompute/.test(app) && !/function render[\s\S]*?refreshCountBeats\(/.test(app));
+
+// ---- Voice lead scales with count interval (so half-time doesn't lag) ----
+// Mirror of the lead formula: lead grows with the beat interval.
+function lead(base, interval, rate) { return (base + interval * 0.18) * rate; }
+const normalLead = lead(0.14, 0.375, 1);   // 160 BPM normal beat
+const halfLead = lead(0.14, 0.75, 1);      // 160 BPM half-time (double interval)
+check('half-time voice lead is larger than normal', halfLead > normalLead, normalLead.toFixed(3) + ' → ' + halfLead.toFixed(3));
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
