@@ -16,6 +16,11 @@
   --safe-b: env(safe-area-inset-bottom, 0px);
 }
 html, body { height: 100%; }
+/* The native [hidden] attribute must always win. Several elements combine a
+   class that sets display (flex/grid) with the hidden attribute to toggle
+   visibility from JS; without this, the class would override hidden and leave
+   invisible elements mounted — including a full-screen modal that eats clicks. */
+[hidden] { display: none !important; }
 body {
   background: radial-gradient(130% 90% at 50% 0%, #181826 0%, var(--bg) 55%);
   color: var(--text);
