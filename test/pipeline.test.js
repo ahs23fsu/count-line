@@ -61,6 +61,7 @@ const A = window.CountLineAnalyzer;
   const check = (name, ok, detail) => { console.log((ok ? 'PASS' : 'FAIL') + ' — ' + name + (detail ? '  [' + detail + ']' : '')); ok ? pass++ : fail++; };
 
   check('duration ~20s', Math.abs(r.duration - 20) < 0.5, r.duration.toFixed(1) + 's');
+  check('reports an audioStart value', typeof r.audioStart === 'number' && r.audioStart >= 0, r.audioStart + 's');
   check('BPM reported (90-160)', r.bpm >= 90 && r.bpm <= 160, r.bpm + ' BPM');
   check('inferred 4/4 meter', r.beatsPerBar === 4, r.beatsPerBar + '/4');
   check('default count is 8', r.defaultCount === 8, r.defaultCount + '-count');

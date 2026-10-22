@@ -52,11 +52,15 @@
     const localBpms = localTempi(beats);
     const tempoChanges = detectTempoChanges(beats, localBpms);
     const { beatsPerBar, defaultCount } = inferMeter(bpm, beats, envelope, envSr);
+    // Where real audio begins (skip leading silence / quiet intros) so the
+    // count doesn't tick during dead air before the music.
+    const audioStart = detectAudioStart(sig, dsr);
 
     await report(1, 'Done');
     return {
       duration: audioBuf.duration,
       bpm: Math.round(bpm),
+      audioStart,         // seconds: first point of real audio energy
       beats,              // array of beat times (seconds)
       localBpms,          // per-beat local BPM
       tempoChanges,       // [{time, fromBpm, toBpm, beatIndex}]
@@ -123,6 +127,46 @@
       out[i] = c ? s / c : 0;
     }
     return { data: out, sr: srOut };
+  }
+
+  /* ---------- 2b. Audio-start detection ----------
+   * Find where real audio begins, so counting skips leading silence or a very
+   * quiet intro. We build a coarse RMS energy profile over ~20ms windows, take
+   * a robust "loud" reference (a high percentile of energy), and return the
+   * first time energy rises above a small fraction of that and STAYS up for a
+   * short run (so a single stray click doesn't count as the start).
+   */
+  function detectAudioStart(sig, sr) {
+    const win = Math.max(1, Math.round(sr * 0.02)); // 20ms windows
+    const n = Math.floor(sig.length / win);
+    if (n < 3) return 0;
+    const rms = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      const off = i * win;
+      for (let j = 0; j < win; j++) { const v = sig[off + j] || 0; s += v * v; }
+      rms[i] = Math.sqrt(s / win);
+    }
+    // Robust loudness reference: ~80th percentile of window energy.
+    const sorted = Array.from(rms).sort((a, b) => a - b);
+    const ref = sorted[Math.floor(sorted.length * 0.8)] || 0;
+    if (ref <= 1e-6) return 0; // essentially silent file → don't offset
+    const thresh = ref * 0.15;        // "audio present" level
+    const runNeeded = Math.max(3, Math.round(0.08 / 0.02)); // sustained ~80ms
+
+    let run = 0;
+    for (let i = 0; i < n; i++) {
+      if (rms[i] >= thresh) {
+        if (++run >= runNeeded) {
+          const startWin = i - run + 1;
+          // Back off one window so we don't clip the very attack of the sound.
+          return Math.max(0, (startWin - 1) * win) / sr;
+        }
+      } else {
+        run = 0;
+      }
+    }
+    return 0;
   }
 
   /* ---------- 3. Onset envelope (spectral flux, low-freq biased) ----------

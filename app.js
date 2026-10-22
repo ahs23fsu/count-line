@@ -13,6 +13,7 @@
     result: null,          // AnalysisResult from the analyzer
     countLen: 8,           // active count length (8/6/4/2)
     beatStep: 1,           // 1 = normal, 2 = half-time (count every other beat)
+    countStart: 0,         // seconds: count "1" begins at/after this time
     autoMode: true,        // whether count length follows the time signature
     phrases: [],           // [{start, beats:[t,...]}] grouped by count length
     raf: 0,
@@ -39,6 +40,7 @@
     timeline: $('timeline'), phraseCountLabel: $('phraseCountLabel'),
     curTime: $('curTime'), totTime: $('totTime'),
     back8Btn: $('back8Btn'), playBtn: $('playBtn'), fwd8Btn: $('fwd8Btn'),
+    setStartBtn: $('setStartBtn'), resetStartBtn: $('resetStartBtn'), startLabel: $('startLabel'),
     countModeSel: $('countModeSel'), feelSel: $('feelSel'), speedSel: $('speedSel'), flashToggle: $('flashToggle'),
     voiceToggle: $('voiceToggle'), voiceOptRow: $('voiceOptRow'), voiceStyleSel: $('voiceStyleSel'),
     exportBtn: $('exportBtn'),
@@ -140,6 +142,7 @@
     S.autoMode = el.countModeSel.value === 'auto';
     S.countLen = S.autoMode ? r.defaultCount : parseInt(el.countModeSel.value, 10);
     S.beatStep = parseInt(el.feelSel.value, 10) || 1;   // honour the chosen feel
+    S.countStart = r.audioStart || 0;                   // skip the intro by default
 
     el.songTitle.textContent = S.fileName;
     el.chipSig.textContent = r.beatsPerBar === 3 ? '3/4' : '4/4';
@@ -152,6 +155,7 @@
       ? r.bpm + ' BPM · count ' + Math.round(r.bpm / S.beatStep)
       : r.bpm + ' BPM';
     el.chipCount.textContent = S.countLen + '-count' + (S.beatStep > 1 ? ' (½-time)' : '');
+    updateStartUI();
     buildTimeline();
     render(0);
   }
@@ -162,10 +166,19 @@
   // still phrasing it in 8s. All counting (display, phrases, timeline, voice,
   // export) derives from this one list, so half-time stays consistent.
   function countBeats() {
+    // Only count from the chosen origin onward, so the count never ticks
+    // during a silent / spoken intro before the music (or before your
+    // choreography's downbeat if you set one manually).
+    const origin = S.countStart || 0;
     const all = S.result.beats;
-    if (S.beatStep <= 1) return all;
+    // First beat at or after the origin (small tolerance so a beat landing a
+    // hair before the detected start still counts as beat 1).
+    let startIdx = 0;
+    while (startIdx < all.length && all[startIdx] < origin - 0.03) startIdx++;
+    const usable = all.slice(startIdx);
+    if (S.beatStep <= 1) return usable;
     const out = [];
-    for (let i = 0; i < all.length; i += S.beatStep) out.push(all[i]);
+    for (let i = 0; i < usable.length; i += S.beatStep) out.push(usable[i]);
     return out;
   }
 
@@ -188,6 +201,23 @@
     const r = S.result;
     const dur = r.duration;
     el.timeline.innerHTML = '';
+
+    // Dim the region before counting starts (intro / pre-count), and mark the
+    // exact start with a flag so it's obvious where count "1" begins.
+    const origin = S.phrases.length ? S.phrases[0].start : 0;
+    if (origin > 0.1) {
+      const pre = document.createElement('div');
+      pre.className = 'tl-precount';
+      pre.style.left = '0%';
+      pre.style.width = (origin / dur) * 100 + '%';
+      pre.title = 'Before counting starts';
+      el.timeline.appendChild(pre);
+      const flag = document.createElement('div');
+      flag.className = 'tl-start';
+      flag.style.left = (origin / dur) * 100 + '%';
+      flag.title = 'Counting starts here (' + fmt(origin) + ')';
+      el.timeline.appendChild(flag);
+    }
 
     // Phrase blocks (alternating shade) with every 4th phrase numbered.
     S.phrases.forEach((ph, i) => {
@@ -421,6 +451,37 @@
   function syncTransportLabels() {
     el.back8Btn.textContent = '⟲ ' + S.countLen;
     el.fwd8Btn.textContent = S.countLen + ' ⟳';
+  }
+
+  // ---------- "Start counting here" ----------
+  // Snap the count origin to the nearest detected beat at the playhead, so
+  // count "1" lands exactly on a real beat where your routine begins.
+  el.setStartBtn.addEventListener('click', () => {
+    const t = S.audio.currentTime;
+    const all = S.result.beats;
+    let nearest = all[0] || 0, best = Infinity;
+    for (const b of all) { const d = Math.abs(b - t); if (d < best) { best = d; nearest = b; } }
+    S.countStart = nearest;
+    updateStartUI();
+    rebuildCounts();
+  });
+  el.resetStartBtn.addEventListener('click', () => {
+    S.countStart = S.result.audioStart || 0;
+    updateStartUI();
+    rebuildCounts();
+  });
+
+  function updateStartUI() {
+    const auto = S.result.audioStart || 0;
+    const manual = Math.abs(S.countStart - auto) > 0.05;
+    el.resetStartBtn.hidden = !manual;
+    if (manual) {
+      el.startLabel.textContent = 'Counting from ' + fmt(S.countStart);
+    } else if (auto > 0.25) {
+      el.startLabel.textContent = 'Skipping intro — counting from ' + fmt(auto);
+    } else {
+      el.startLabel.textContent = '';
+    }
   }
 
   // ============================================================
