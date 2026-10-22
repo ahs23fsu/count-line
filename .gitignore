@@ -1,0 +1,8 @@
+# Generated test fixture — regenerate with: node test/make-wav.js test/test-tone.wav
+test/test-tone.wav
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
