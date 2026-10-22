@@ -35,14 +35,16 @@
         <h2>Upload your song</h2>
         <p class="muted">Drop an MP3 (or WAV / M4A) and we'll find the counts — tempo changes and all.</p>
 
-        <label id="dropZone" class="drop-zone" tabindex="0">
-          <input id="fileInput" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg" hidden />
+        <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-label="Choose an audio file">
           <div class="drop-inner">
             <div class="drop-icon">♪</div>
             <strong>Tap to choose a file</strong>
             <span class="muted">or drag it here</span>
           </div>
-        </label>
+        </div>
+        <input id="fileInput" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.oga,.flac" hidden />
+
+        <p id="selectedFile" class="selected-file" hidden></p>
 
         <div id="analyzeStatus" class="analyze-status" hidden>
           <div class="spinner" aria-hidden="true"></div>

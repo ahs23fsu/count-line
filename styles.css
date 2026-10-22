@@ -114,6 +114,7 @@ button, select, input { font-family: inherit; }
 .analyze-status { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 18px; font-size: 14px; }
 .spinner { width: 20px; height: 20px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.selected-file { color: var(--good); font-size: 14px; font-weight: 600; margin-top: 14px; word-break: break-word; }
 .error-msg { color: #ff6b8a; font-size: 14px; margin-top: 14px; }
 
 /* ===================== COUNTER HEAD ===================== */

@@ -28,6 +28,7 @@
   const el = {
     uploadScreen: $('uploadScreen'), counterScreen: $('counterScreen'),
     dropZone: $('dropZone'), fileInput: $('fileInput'),
+    selectedFile: $('selectedFile'),
     analyzeStatus: $('analyzeStatus'), analyzeStatusText: $('analyzeStatusText'),
     uploadError: $('uploadError'),
     songTitle: $('songTitle'), chipBpm: $('chipBpm'), chipSig: $('chipSig'), chipCount: $('chipCount'),
@@ -46,26 +47,53 @@
   // ============================================================
   // Upload + analysis
   // ============================================================
+  // The drop zone is a plain button that opens the (separate) file input. The
+  // input is NOT wrapped in a label, so there is no double-trigger — a past
+  // bug where the picker fired twice and cancelled the selection on mobile.
   el.dropZone.addEventListener('click', () => el.fileInput.click());
   el.dropZone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.fileInput.click(); } });
-  el.fileInput.addEventListener('change', (e) => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+  el.fileInput.addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) handleFile(f);
+    // Reset so picking the SAME file again still fires 'change'.
+    e.target.value = '';
+  });
 
   ['dragenter', 'dragover'].forEach((ev) => el.dropZone.addEventListener(ev, (e) => { e.preventDefault(); el.dropZone.classList.add('drag'); }));
   ['dragleave', 'drop'].forEach((ev) => el.dropZone.addEventListener(ev, (e) => { e.preventDefault(); el.dropZone.classList.remove('drag'); }));
-  el.dropZone.addEventListener('drop', (e) => { const f = e.dataTransfer.files[0]; if (f) handleFile(f); });
+  el.dropZone.addEventListener('drop', (e) => { const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) handleFile(f); });
 
   async function handleFile(file) {
     el.uploadError.hidden = true;
-    if (!/audio|mp3|wav|m4a|ogg/i.test(file.type + file.name)) {
-      return showError('That doesn\u2019t look like an audio file. Try an MP3, WAV, or M4A.');
+
+    // Immediate on-screen confirmation that the file was received — so there's
+    // never a "nothing happened" moment after picking from the library.
+    el.selectedFile.textContent = '♪ ' + file.name;
+    el.selectedFile.hidden = false;
+
+    // Accept by MIME *or* extension, but also accept anything the browser
+    // couldn't classify (mobile pickers often report an empty type / generic
+    // name). We only hard-reject files that clearly declare a non-audio type.
+    const name = (file.name || '').toLowerCase();
+    const type = (file.type || '').toLowerCase();
+    const looksAudio = /audio|mpeg|mp3|wav|m4a|aac|ogg|oga|flac|x-/i.test(type) ||
+      /\.(mp3|wav|m4a|aac|ogg|oga|flac|aiff?|caf)$/i.test(name);
+    const clearlyNotAudio = /^(image|video|text|application)\//.test(type) && !/ogg|mpeg/.test(type);
+    if (!looksAudio && clearlyNotAudio) {
+      return showError('That looks like a ' + type.split('/')[0] + ' file, not audio. Pick an MP3, M4A, or WAV.');
     }
+
     el.analyzeStatus.hidden = false;
+    el.analyzeStatusText.textContent = 'Reading file…';
     el.dropZone.style.opacity = '.5';
     el.dropZone.style.pointerEvents = 'none';
-    S.fileName = file.name.replace(/\.[^.]+$/, '');
+    S.fileName = file.name.replace(/\.[^.]+$/, '') || 'Your song';
 
     try {
       const buf = await file.arrayBuffer();
+      if (!buf || buf.byteLength === 0) {
+        throw new Error('That file came through empty. Try downloading it to your device first, then upload.');
+      }
       // Hard overall timeout so a stuck analysis surfaces as a message instead
       // of a frozen, actionless screen.
       const analysis = CountLineAnalyzer.analyze(buf, (p, msg) => {
@@ -93,7 +121,15 @@
     }
   }
 
-  function showError(msg) { el.uploadError.textContent = msg; el.uploadError.hidden = false; }
+  function showError(msg) {
+    el.uploadError.textContent = msg;
+    el.uploadError.hidden = false;
+    el.selectedFile.hidden = true;
+    // Make sure the drop zone is usable again after a failure.
+    el.dropZone.style.opacity = '';
+    el.dropZone.style.pointerEvents = '';
+    el.analyzeStatus.hidden = true;
+  }
 
   // ============================================================
   // Song setup
