@@ -66,9 +66,14 @@
 
     try {
       const buf = await file.arrayBuffer();
-      const result = await CountLineAnalyzer.analyze(buf, (p, msg) => {
+      // Hard overall timeout so a stuck analysis surfaces as a message instead
+      // of a frozen, actionless screen.
+      const analysis = CountLineAnalyzer.analyze(buf, (p, msg) => {
         el.analyzeStatusText.textContent = msg + ' ' + Math.round(p * 100) + '%';
       });
+      const timeout = new Promise((_, rej) =>
+        setTimeout(() => rej(new Error('Analysis timed out. Try a shorter clip or a different file.')), 60000));
+      const result = await Promise.race([analysis, timeout]);
       if (!result.beats || result.beats.length < 4) throw new Error('Couldn\u2019t find a steady beat in this track.');
 
       S.result = result;

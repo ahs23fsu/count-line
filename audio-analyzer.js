@@ -19,36 +19,41 @@
   const FRAME = 1024;       // analysis frame size
   const TARGET_SR = 22050;  // downsample target for speed
 
+  // Yield to the event loop so the browser can repaint the progress UI and
+  // stay responsive. Without this the whole analysis blocks the main thread
+  // and a phone shows a frozen screen (or kills the tab).
+  const nextTick = () => new Promise((r) => setTimeout(r, 0));
+
   /** Public entry point. Returns a Promise<AnalysisResult>. */
   async function analyze(arrayBuffer, onProgress) {
-    const report = (p, msg) => { if (onProgress) onProgress(p, msg); };
+    const report = async (p, msg) => { if (onProgress) onProgress(p, msg); await nextTick(); };
 
-    report(0.05, 'Decoding audio…');
+    await report(0.05, 'Decoding audio…');
     const audioBuf = await decode(arrayBuffer);
     const sr = audioBuf.sampleRate;
 
-    report(0.25, 'Preparing signal…');
+    await report(0.25, 'Preparing signal…');
     const mono = toMono(audioBuf);
     const { data: sig, sr: dsr } = downsample(mono, sr, TARGET_SR);
 
-    report(0.4, 'Finding onsets…');
-    const { envelope, envSr } = onsetEnvelope(sig, dsr);
+    await report(0.4, 'Finding onsets…');
+    const { envelope, envSr } = await onsetEnvelope(sig, dsr, onProgress);
 
-    report(0.6, 'Estimating tempo…');
+    await report(0.6, 'Estimating tempo…');
     const bpm = estimateTempo(envelope, envSr);
     // A tempo PROFILE (BPM estimated in overlapping windows) so the tracker's
     // allowed period follows songs that speed up or slow down.
-    const tempoProfile = tempoProfileOf(envelope, envSr);
+    const tempoProfile = await tempoProfileOf(envelope, envSr);
 
-    report(0.75, 'Tracking beats…');
+    await report(0.75, 'Tracking beats…');
     const beats = trackBeats(envelope, envSr, bpm, tempoProfile);
 
-    report(0.9, 'Mapping the song…');
+    await report(0.9, 'Mapping the song…');
     const localBpms = localTempi(beats);
     const tempoChanges = detectTempoChanges(beats, localBpms);
     const { beatsPerBar, defaultCount } = inferMeter(bpm, beats, envelope, envSr);
 
-    report(1, 'Done');
+    await report(1, 'Done');
     return {
       duration: audioBuf.duration,
       bpm: Math.round(bpm),
@@ -60,16 +65,36 @@
     };
   }
 
-  /* ---------- 1. Decode ---------- */
+  /* ---------- 1. Decode ----------
+   * Mobile-hardened: resume a possibly-suspended context (iOS/Safari starts
+   * suspended), support both the promise and callback forms of
+   * decodeAudioData, and time out so a stuck decode can never hang the app
+   * silently.
+   */
   function decode(arrayBuffer) {
     const Ctx = global.AudioContext || global.webkitAudioContext;
+    if (!Ctx) return Promise.reject(new Error('This browser has no Web Audio support.'));
     const ctx = new Ctx();
+    const done = (fn) => { try { ctx.close && ctx.close(); } catch (_) {} fn(); };
+
     return new Promise((resolve, reject) => {
-      ctx.decodeAudioData(
-        arrayBuffer.slice(0),
-        (buf) => { ctx.close && ctx.close(); resolve(buf); },
-        (err) => { ctx.close && ctx.close(); reject(err || new Error('Could not decode audio')); }
-      );
+      let settled = false;
+      const ok = (buf) => { if (settled) return; settled = true; done(() => resolve(buf)); };
+      const fail = (err) => { if (settled) return; settled = true; done(() => reject(err || new Error('Could not decode this audio file.'))); };
+
+      // Safety net: never hang forever.
+      const timer = setTimeout(() => fail(new Error('Decoding took too long — the file may be corrupt or in an unsupported format.')), 25000);
+      const clear = (f) => (x) => { clearTimeout(timer); f(x); };
+
+      // Resume first (no-op where unsupported / already running).
+      Promise.resolve(ctx.resume && ctx.resume()).catch(() => {}).then(() => {
+        let ret;
+        try {
+          ret = ctx.decodeAudioData(arrayBuffer.slice(0), clear(ok), clear(fail));
+        } catch (e) { return clear(fail)(e); }
+        // Promise-based form (modern browsers) resolves here too.
+        if (ret && typeof ret.then === 'function') ret.then(clear(ok), clear(fail));
+      });
     });
   }
 
@@ -100,22 +125,28 @@
     return { data: out, sr: srOut };
   }
 
-  /* ---------- 3. Onset envelope (spectral flux, low-freq biased) ---------- */
-  function onsetEnvelope(sig, sr) {
+  /* ---------- 3. Onset envelope (spectral flux, low-freq biased) ----------
+   * This is the heaviest stage (an FFT per hop over the whole song), so it is
+   * async and yields to the event loop every few thousand frames to keep the
+   * UI responsive and the progress bar moving on mobile.
+   */
+  async function onsetEnvelope(sig, sr, onProgress) {
     const nFrames = Math.max(1, Math.floor((sig.length - FRAME) / HOP));
     const env = new Float32Array(nFrames);
     const window = hann(FRAME);
-    let prevMag = new Float32Array(FRAME / 2);
+    const half = FRAME / 2;
+    let prevMag = new Float32Array(half);
+    const re = new Float32Array(FRAME);
+    const im = new Float32Array(FRAME);
+    const CHUNK = 2000; // frames between yields
 
     for (let f = 0; f < nFrames; f++) {
       const off = f * HOP;
-      const re = new Float32Array(FRAME);
-      const im = new Float32Array(FRAME);
+      im.fill(0);
       for (let i = 0; i < FRAME; i++) re[i] = (sig[off + i] || 0) * window[i];
       fft(re, im);
 
       let flux = 0;
-      const half = FRAME / 2;
       for (let k = 1; k < half; k++) {
         const mag = Math.hypot(re[k], im[k]);
         // Weight lower frequencies more — the "pulse" dancers march to.
@@ -125,6 +156,11 @@
         prevMag[k] = mag;
       }
       env[f] = flux;
+
+      if (f % CHUNK === CHUNK - 1) {
+        if (onProgress) onProgress(0.4 + 0.18 * (f / nFrames), 'Finding onsets…');
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
 
     // Normalize + light smoothing.
@@ -138,16 +174,18 @@
    * sectional tempo changes instead of being pinned to one global average.
    * Returns { at(timeSec) -> bpm }.
    */
-  function tempoProfileOf(env, envSr) {
+  async function tempoProfileOf(env, envSr) {
     const winSec = 5, hopSec = 1.5;
     const winN = Math.round(winSec * envSr);
     const hopN = Math.round(hopSec * envSr);
     const points = []; // {t, bpm}
+    let w = 0;
     for (let start = 0; start + winN <= env.length || points.length === 0; start += hopN) {
       const seg = env.subarray(start, Math.min(env.length, start + winN));
       if (seg.length < envSr * 1.5) break;
       const bpm = estimateTempo(seg, envSr);
       points.push({ t: (start + winN / 2) / envSr, bpm });
+      if (++w % 20 === 0) await new Promise((r) => setTimeout(r, 0)); // yield periodically
       if (start + winN >= env.length) break;
     }
     if (!points.length) points.push({ t: 0, bpm: estimateTempo(env, envSr) });
