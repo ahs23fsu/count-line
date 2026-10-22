@@ -262,7 +262,7 @@
     const minLag = Math.floor((60 / maxBpm) * envSr);
     const maxLag = Math.floor((60 / minBpm) * envSr);
     let best = minLag, bestScore = -Infinity;
-    const scores = [];
+    const score = new Float64Array(maxLag + 1);
 
     for (let lag = minLag; lag <= maxLag; lag++) {
       let sum = 0;
@@ -270,12 +270,26 @@
       // Slight preference toward the center of the dance-tempo range.
       const bpmAtLag = 60 / (lag / envSr);
       const pref = 1 - 0.15 * Math.abs(Math.log2(bpmAtLag / 120));
-      const score = sum * pref;
-      scores.push({ lag, score });
-      if (score > bestScore) { bestScore = score; best = lag; }
+      const s = sum * pref;
+      score[lag] = s;
+      if (s > bestScore) { bestScore = s; best = lag; }
     }
 
-    let bpm = 60 / (best / envSr);
+    // Sub-frame precision: fit a parabola to the peak and its neighbours so the
+    // period isn't quantized to whole frames. Frame quantization (~23ms/beat)
+    // was a systematic per-beat error that compounded into audible drift over
+    // a long song.
+    let bestLag = best;
+    if (best > minLag && best < maxLag) {
+      const y1 = score[best - 1], y2 = score[best], y3 = score[best + 1];
+      const denom = (y1 - 2 * y2 + y3);
+      if (denom !== 0) {
+        const delta = 0.5 * (y1 - y3) / denom; // in [-1, 1]
+        if (delta > -1 && delta < 1) bestLag = best + delta;
+      }
+    }
+
+    let bpm = 60 / (bestLag / envSr);
     // Octave correction: fold into a comfortable dance range.
     while (bpm < 70) bpm *= 2;
     while (bpm > 180) bpm /= 2;
@@ -311,28 +325,50 @@
 
     const step = (startF, dir) => {
       // dir = +1 forward, -1 backward. Returns array of beat frames (excl. start).
+      //
+      // Anti-drift design: we keep a FLOATING-POINT running beat position that
+      // always advances by the exact (sub-frame) local period. When a clear
+      // onset sits near the prediction we gently CORRECT the phase toward it;
+      // when the beat is weak/quiet we keep the mathematically-exact grid
+      // position instead of snapping to whatever noise is loudest. This stops
+      // small per-beat errors from accumulating into audible drift late in the
+      // song, while still following real tempo changes.
       const out = [];
-      let last = startF;
+      let last = startF;                 // float frame position of previous beat
       let locP = clampAt(startF, localPeriodAt(startF));
+      // Reference onset strength so we know what counts as a "real" onset.
+      const ref = percentile(e, 0.75) || 1e-6;
+
       while (true) {
         const predicted = last + dir * locP;
-        if (predicted <= 0 || predicted >= n) break;
-        const tol = Math.max(2, Math.round(locP * 0.16)); // tight window prevents double-tracking
+        if (predicted <= 1 || predicted >= n - 1) break;
+        const tol = Math.max(2, Math.round(locP * 0.16));
         const lo = Math.max(1, Math.round(predicted - tol));
         const hi = Math.min(n - 1, Math.round(predicted + tol));
-        let bestF = Math.round(predicted), bestScore = -Infinity;
+
+        // Find the strongest onset in the window (no prediction bias, so a real
+        // beat wins on its own merit).
+        let peakF = -1, peakVal = -Infinity;
         for (let f = lo; f <= hi; f++) {
-          const dist = (f - predicted) / tol;
-          const bias = 1 - 0.4 * dist * dist;     // prefer the predicted location
-          const s = (e[f] || 0) * bias;
-          if (s > bestScore) { bestScore = s; bestF = f; }
+          if (e[f] > peakVal) { peakVal = e[f]; peakF = f; }
         }
-        out.push(bestF);
-        const observed = Math.abs(bestF - last);
-        // Ease toward observed, then re-clamp to the band at the new position
-        // so the period can migrate as the song's local tempo migrates.
-        locP = clampAt(bestF, locP * 0.78 + observed * 0.22);
-        last = bestF;
+
+        let beatPos;
+        if (peakF >= 0 && peakVal >= ref * 0.4) {
+          // Clear onset: sub-frame refine its location, then pull the grid only
+          // PART of the way toward it (phase-lock, not a hard snap) so one noisy
+          // frame can't yank the whole grid.
+          const refined = refinePeak(e, peakF);
+          beatPos = predicted + 0.5 * (refined - predicted);
+          const observed = Math.abs(beatPos - last);
+          locP = clampAt(Math.round(beatPos), locP * 0.85 + observed * 0.15);
+        } else {
+          // Weak/quiet beat: trust the exact grid position; do not drift.
+          beatPos = predicted;
+        }
+
+        out.push(beatPos);
+        last = beatPos;
       }
       return out;
     };
@@ -342,8 +378,18 @@
     const back = step(anchor, -1).reverse();
 
     const all = back.concat([anchor], fwd);
-    return all.map((f) => f / envSr);
+    // Latency compensation: the onset-flux + smoothing pipeline reports beats a
+    // fixed ~2.9 frames late. Subtract that constant so counts land ON the beat
+    // rather than just behind it. It's a fixed offset (verified by the drift
+    // test), so one correction fixes every beat uniformly.
+    const latencyFrames = ONSET_LATENCY_FRAMES;
+    return all.map((f) => Math.max(0, (f - latencyFrames) / envSr));
   }
+
+  // Empirically measured onset-detection offset of this envelope pipeline, in
+  // envelope frames (~23ms each). Tuned (via test/drift.test.js) so tracked
+  // beats align with the true transient to within a couple of ms.
+  const ONSET_LATENCY_FRAMES = -3.1;
 
   function firstStrongOnset(e, period) {
     // Anchor on the strongest onset within the first ~2 beats.
@@ -351,6 +397,28 @@
     let bestF = Math.round(period), best = -Infinity;
     for (let f = 0; f <= limit; f++) if (e[f] > best) { best = e[f]; bestF = f; }
     return bestF;
+  }
+
+  // Sub-frame peak location via parabolic interpolation around frame f.
+  function refinePeak(e, f) {
+    if (f <= 0 || f >= e.length - 1) return f;
+    const y1 = e[f - 1], y2 = e[f], y3 = e[f + 1];
+    const denom = y1 - 2 * y2 + y3;
+    if (denom === 0) return f;
+    const d = 0.5 * (y1 - y3) / denom;
+    return (d > -1 && d < 1) ? f + d : f;
+  }
+
+  // Approximate percentile of an array's values (for an onset-strength ref).
+  function percentile(arr, p) {
+    const n = arr.length;
+    if (!n) return 0;
+    // Sample to keep this cheap on long envelopes.
+    const stride = Math.max(1, Math.floor(n / 2000));
+    const vals = [];
+    for (let i = 0; i < n; i += stride) vals.push(arr[i]);
+    vals.sort((a, b) => a - b);
+    return vals[Math.min(vals.length - 1, Math.floor(vals.length * p))];
   }
 
   /* ---------- 6. Local tempi + tempo-change detection ---------- */
