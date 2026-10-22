@@ -12,6 +12,7 @@
     objectUrl: null,
     result: null,          // AnalysisResult from the analyzer
     countLen: 8,           // active count length (8/6/4/2)
+    beatStep: 1,           // 1 = normal, 2 = half-time (count every other beat)
     autoMode: true,        // whether count length follows the time signature
     phrases: [],           // [{start, beats:[t,...]}] grouped by count length
     raf: 0,
@@ -38,7 +39,7 @@
     timeline: $('timeline'), phraseCountLabel: $('phraseCountLabel'),
     curTime: $('curTime'), totTime: $('totTime'),
     back8Btn: $('back8Btn'), playBtn: $('playBtn'), fwd8Btn: $('fwd8Btn'),
-    countModeSel: $('countModeSel'), speedSel: $('speedSel'), flashToggle: $('flashToggle'),
+    countModeSel: $('countModeSel'), feelSel: $('feelSel'), speedSel: $('speedSel'), flashToggle: $('flashToggle'),
     voiceToggle: $('voiceToggle'), voiceOptRow: $('voiceOptRow'), voiceStyleSel: $('voiceStyleSel'),
     exportBtn: $('exportBtn'),
     helpBtn: $('helpBtn'), helpModal: $('helpModal'), closeHelp: $('closeHelp'),
@@ -138,30 +139,46 @@
     const r = S.result;
     S.autoMode = el.countModeSel.value === 'auto';
     S.countLen = S.autoMode ? r.defaultCount : parseInt(el.countModeSel.value, 10);
-
-    buildPhrases();
+    S.beatStep = parseInt(el.feelSel.value, 10) || 1;   // honour the chosen feel
 
     el.songTitle.textContent = S.fileName;
-    el.chipBpm.textContent = r.bpm + ' BPM';
     el.chipSig.textContent = r.beatsPerBar === 3 ? '3/4' : '4/4';
-    el.chipCount.textContent = S.countLen + '-count';
     el.totTime.textContent = fmt(r.duration);
     el.speedSel.value = '1';
     S.audio.playbackRate = 1;
 
+    buildPhrases();
+    el.chipBpm.textContent = S.beatStep > 1
+      ? r.bpm + ' BPM · count ' + Math.round(r.bpm / S.beatStep)
+      : r.bpm + ' BPM';
+    el.chipCount.textContent = S.countLen + '-count' + (S.beatStep > 1 ? ' (½-time)' : '');
     buildTimeline();
     render(0);
   }
 
-  // Group the flat beat list into phrases of the active count length.
+  // The beats we actually COUNT on. In half-time (beatStep = 2) we count on
+  // every other musical beat, so a count "1" lands on beats 1, 3, 5… — the
+  // standard way to count a fast song at a marchable, half-speed pace while
+  // still phrasing it in 8s. All counting (display, phrases, timeline, voice,
+  // export) derives from this one list, so half-time stays consistent.
+  function countBeats() {
+    const all = S.result.beats;
+    if (S.beatStep <= 1) return all;
+    const out = [];
+    for (let i = 0; i < all.length; i += S.beatStep) out.push(all[i]);
+    return out;
+  }
+
+  // Group the active count-beats into phrases of the active count length.
   function buildPhrases() {
-    const beats = S.result.beats;
+    const beats = countBeats();
     S.phrases = [];
     for (let i = 0; i < beats.length; i += S.countLen) {
       const slice = beats.slice(i, i + S.countLen);
       if (slice.length) S.phrases.push({ start: slice[0], beats: slice });
     }
-    el.phraseCountLabel.textContent = S.phrases.length + ' \u00d7 ' + S.countLen + '-counts';
+    const htLabel = S.beatStep > 1 ? ' · half-time' : '';
+    el.phraseCountLabel.textContent = S.phrases.length + ' \u00d7 ' + S.countLen + '-counts' + htLabel;
   }
 
   // ============================================================
@@ -308,8 +325,8 @@
   function render(t) {
     const r = S.result; if (!r) return;
 
-    // Which beat are we on?
-    const beats = r.beats;
+    // Which count-beat are we on? (honours half-time)
+    const beats = countBeats();
     let bi = 0;
     while (bi < beats.length - 1 && beats[bi + 1] <= t) bi++;
     if (t < beats[0]) bi = -1;
@@ -409,17 +426,33 @@
   // ============================================================
   // Options
   // ============================================================
-  el.countModeSel.addEventListener('change', () => {
-    const v = el.countModeSel.value;
-    S.autoMode = v === 'auto';
-    S.countLen = S.autoMode ? S.result.defaultCount : parseInt(v, 10);
-    el.chipCount.textContent = S.countLen + '-count';
+  // Rebuild everything that depends on the active count beats (count length
+  // and half-time), then re-render at the current position.
+  function rebuildCounts() {
+    el.chipCount.textContent = S.countLen + '-count' + (S.beatStep > 1 ? ' (½-time)' : '');
+    // Show the count tempo too: half-time counts at half the song's BPM.
+    const countBpm = Math.round(S.result.bpm / S.beatStep);
+    el.chipBpm.textContent = S.beatStep > 1
+      ? S.result.bpm + ' BPM · count ' + countBpm
+      : S.result.bpm + ' BPM';
     buildPhrases();
     buildTimeline();
     syncTransportLabels();
     lastBeatIdx = -1;
-    S.lastSpokenBeat = -1;          // count length changed → re-evaluate voice
+    S.lastSpokenBeat = -1;          // counting changed → re-evaluate voice
     render(S.audio.currentTime);
+  }
+
+  el.countModeSel.addEventListener('change', () => {
+    const v = el.countModeSel.value;
+    S.autoMode = v === 'auto';
+    S.countLen = S.autoMode ? S.result.defaultCount : parseInt(v, 10);
+    rebuildCounts();
+  });
+
+  el.feelSel.addEventListener('change', () => {
+    S.beatStep = parseInt(el.feelSel.value, 10) || 1;
+    rebuildCounts();
   });
 
   el.speedSel.addEventListener('change', () => { S.audio.playbackRate = parseFloat(el.speedSel.value); });
@@ -449,13 +482,18 @@
     const lines = [];
     lines.push('CountLine — Count Sheet');
     lines.push('Song: ' + S.fileName);
-    lines.push(`Tempo: ${r.bpm} BPM   Time: ${r.beatsPerBar === 3 ? '3/4' : '4/4'}   Counting in ${S.countLen}s`);
+    const feel = S.beatStep > 1 ? '   Feel: HALF-TIME (count ' + Math.round(r.bpm / S.beatStep) + ' BPM)' : '';
+    lines.push(`Tempo: ${r.bpm} BPM   Time: ${r.beatsPerBar === 3 ? '3/4' : '4/4'}   Counting in ${S.countLen}s${feel}`);
     lines.push(`Length: ${fmt(r.duration)}   Phrases: ${S.phrases.length}`);
     lines.push(''.padEnd(48, '='));
     lines.push('');
 
     S.phrases.forEach((ph, i) => {
-      const tc = r.tempoChanges.find((c) => c.beatIndex >= i * S.countLen && c.beatIndex < (i + 1) * S.countLen);
+      // Flag a phrase that contains a tempo change. tempoChanges use raw beat
+      // indices, so scale phrase bounds back to raw beats by beatStep.
+      const loRaw = i * S.countLen * S.beatStep;
+      const hiRaw = (i + 1) * S.countLen * S.beatStep;
+      const tc = r.tempoChanges.find((c) => c.beatIndex >= loRaw && c.beatIndex < hiRaw);
       let line = String(i + 1).padStart(3, ' ') + '.  ' + fmt(ph.start) + '   ' +
         ph.beats.map((_, k) => k + 1).join(' ');
       if (tc) line += `   <<< TEMPO CHANGE: ${tc.fromBpm} -> ${tc.toBpm} BPM`;
